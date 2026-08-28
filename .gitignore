@@ -1,0 +1,9 @@
+# GIANTS mod build output, except the one zip that IS the release
+*.zip
+!release/*.zip
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/

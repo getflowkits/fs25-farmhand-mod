@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8" standalone="no" ?>
+<modDesc descVersion="91">
+    <author>FlowKits</author>
+    <version>2.19.1.0</version>
+    <title>
+        <en>FS25 Farmhand Companion</en>
+    </title>
+    <description>
+        <en>Mod for Farming Simulator.
+
+Streams your own farm's state (vehicles, fleet, fields, animals, production, contracts, weather and prices) out of the game so a program on your PC can show it, and runs ordinary in-game actions when that program asks. Nothing leaves your machine: it talks over a local pipe and never uses the network.
+
+This mod is free and open source under the MIT license. Anyone can use it, change it, and build their own tools on it. Source, protocol, and download: https://github.com/getflowkits/fs25-farmhand-mod
+
+I use it as the data source for FS25 Farmhand, my Stream Deck plugin. That plugin is separate software and can install this mod for you, but the mod does not need it and costs nothing either way.
+
+Enable it for your savegame in this list.
+
+Not affiliated with or endorsed by GIANTS Software.</en>
+    </description>
+    <!-- REQUIRED. Without it FS25 lists the mod, refuses to load it with
+         "Error: Missing icon filename in mod FS25_Farmhand", and none of the Lua
+         ever runs - so the deck sits at "not connected" with a mod that looks
+         installed and enabled.
+         Invisible on a dev machine: a FOLDER mod (the junction) loads without
+         it, and only the ZIP a customer gets is rejected. Every shipped build
+         before 5 Aug had this. Format matches what the base-game mods ship:
+         512x512 DXT1 DDS, named icon_<ModName>. -->
+    <iconFilename>icon_FS25_Farmhand.dds</iconFilename>
+    <multiplayer supported="true"/>
+    <extraSourceFiles>
+        <sourceFile filename="scripts/Transport.lua"/>
+        <sourceFile filename="scripts/Collectors.lua"/>
+        <sourceFile filename="scripts/Commands.lua"/>
+        <sourceFile filename="scripts/Farmhand.lua"/>
+    </extraSourceFiles>
+</modDesc>
