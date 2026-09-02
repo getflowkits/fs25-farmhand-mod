@@ -1437,20 +1437,51 @@ local HANDLERS = {
         end
         return true
     end,
+    -- ⚠️ THE READ-BACK BELOW IS LOAD-BEARING, here and in the three handlers that
+    -- follow the same shape (lightsToggle, beaconToggle, steeringToggle) plus
+    -- toolToggle and lowerImplement.
+    --
+    -- Calling a setter is not evidence it did anything. A machine can carry the
+    -- spec, answer the getter, accept the setter and still not move, and an
+    -- unverified `return true` then makes the raiseAction fallback below
+    -- UNREACHABLE - so the deck key does nothing while the player's own keyboard
+    -- binding works, because that binding IS the action we skipped.
+    --
+    -- Not hypothetical: it shipped that way in lowerImplement and broke Lower /
+    -- Raise for a customer on every implement whose XML declares
+    -- needsLowering="false" (3 Sep 2026, reproduced on a Fendt 700 Vario with an
+    -- Amazone ZA-TS 3200). Verify the effect, never the call.
     cruiseToggle = function(v)
         if v.getCruiseControlState and v.setCruiseControlState then
-            local s = v:getCruiseControlState()
-            v:setCruiseControlState(s > 0 and 0 or 1)
-            return true
+            local before = v:getCruiseControlState()
+            v:setCruiseControlState(before > 0 and 0 or 1)
+            if v:getCruiseControlState() ~= before then return true end
         end
         return raiseAction(v, "TOGGLE_CRUISE_CONTROL")
     end,
 
     -- LIGHTS
-    lightsToggle = function(v) if v.setNextLightsState then v:setNextLightsState(1); return true end return raiseAction(v, "TOGGLE_LIGHTS") end,
+    -- setNextLightsState CYCLES, so there is no matching getter. The mask that
+    -- stateJson reads is the observable effect, so that is what gets checked.
+    -- A machine with no mask to read falls back to trusting the call: without a
+    -- way to prove nothing happened, firing the action on top would risk undoing
+    -- a lights change that DID work, which is the failure being fixed, inverted.
+    lightsToggle = function(v)
+        if v.setNextLightsState then
+            local sp = v.spec_lights
+            local before = (type(sp) == "table" and type(sp.lightsTypesMask) == "number") and sp.lightsTypesMask or nil
+            v:setNextLightsState(1)
+            if before == nil or sp.lightsTypesMask ~= before then return true end
+        end
+        return raiseAction(v, "TOGGLE_LIGHTS")
+    end,
+    -- The likeliest of the four to bite: plenty of machines carry spec_lights and
+    -- answer getBeaconLightsVisibility without a beacon actually fitted.
     beaconToggle = function(v)
         if v.getBeaconLightsVisibility and v.setBeaconLightsVisibility then
-            v:setBeaconLightsVisibility(not v:getBeaconLightsVisibility()); return true
+            local before = v:getBeaconLightsVisibility()
+            v:setBeaconLightsVisibility(not before)
+            if v:getBeaconLightsVisibility() ~= before then return true end
         end
         return raiseAction(v, "TOGGLE_BEACON_LIGHTS")
     end,
@@ -1493,7 +1524,29 @@ local HANDLERS = {
                         and type(obj.getIsLowered) == "function" then
                         local lowered = obj:getIsLowered()
                         obj:setLoweredAll(not lowered)
-                        did = true
+                        -- CONFIRM THE FLIP. Calling the setter is not evidence it
+                        -- did anything, and claiming success here is what broke
+                        -- Lower/Raise for a customer on 3 Sep 2026.
+                        --
+                        -- An implement whose XML declares needsLowering="false" has
+                        -- setLoweredAll AND getIsLowered, so every guard above
+                        -- passes, and the call is still a no-op: the game treats it
+                        -- as a machine with nothing to lower. 40 base-game
+                        -- implements declare it, including the Amazone ZA-TS 3200,
+                        -- the Bredal SG, every front weight, the balers and the
+                        -- tank trailers.
+                        --
+                        -- Unverified, this returned true and the LOWER_IMPLEMENT
+                        -- action below was never reached, so the deck key did
+                        -- nothing while the player's own V key worked -- because V
+                        -- IS that action. Reproduced in-game on a Fendt 700 Vario
+                        -- with a ZA-TS 3200 attached.
+                        --
+                        -- Same shape as toolToggle above. The flag is set
+                        -- synchronously and the animation follows it, so this
+                        -- read-back is reliable; it is the visible movement that
+                        -- lags, not the flag.
+                        if obj:getIsLowered() ~= lowered then did = true end
                     end
                 end
                 return did
@@ -1547,7 +1600,9 @@ local HANDLERS = {
     aiToggle = function(v) return raiseAction(v, "TOGGLE_AI", true) end,
     steeringToggle = function(v)
         if v.setAIAutomaticSteeringEnabled and v.getAIAutomaticSteeringEnabled then
-            v:setAIAutomaticSteeringEnabled(not v:getAIAutomaticSteeringEnabled()); return true
+            local before = v:getAIAutomaticSteeringEnabled()
+            v:setAIAutomaticSteeringEnabled(not before)
+            if v:getAIAutomaticSteeringEnabled() ~= before then return true end
         end
         return raiseAction(v, "TOGGLE_AI_STEERING")
     end,
@@ -1576,8 +1631,12 @@ local HANDLERS = {
             if n < 2 then n = 2 end
             local nextMode = cur % n + 1
             v:setAIModeSelection(nextMode)
-            log("AIMODE %s -> %s (of %s)", tostring(cur), tostring(nextMode), tostring(n))
-            ok = true
+            -- No action fallback exists for this one, so the read-back only makes
+            -- the log honest rather than unlocking a second path. Still worth it:
+            -- "command ok" on a mode that never changed is how the other five hid.
+            local after = tonumber(v:getAIModeSelection())
+            log("AIMODE %s -> %s (of %s), now %s", tostring(cur), tostring(nextMode), tostring(n), tostring(after))
+            ok = (after ~= cur)
         end)
         return ok
     end,
