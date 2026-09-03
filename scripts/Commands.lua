@@ -2184,6 +2184,10 @@ local HANDLERS = {
     implementExtra  = function(v) return raiseAction(v, "IMPLEMENT_EXTRA") end,
     implementExtra2 = function(v) return raiseAction(v, "IMPLEMENT_EXTRA2") end,
     implementExtra3 = function(v) return raiseAction(v, "IMPLEMENT_EXTRA3") end,
+    -- EXTRA4 earns its handler on evidence: a 16-machine sweep on 3 Sep 2026
+    -- found it reporting "Turn on automatic drop" on a baler, which nothing
+    -- else on the deck could reach.
+    implementExtra4 = function(v) return raiseAction(v, "IMPLEMENT_EXTRA4") end,
     seedsNext       = function(v) return raiseAction(v, "TOGGLE_SEEDS") end,
     seedsPrev       = function(v) return raiseAction(v, "TOGGLE_SEEDS_BACK") end,
     doubleSpray     = function(v) return raiseAction(v, "DOUBLED_SPRAY_AMOUNT") end,

@@ -25,7 +25,7 @@ Farmhand = {}
 -- EVERY session - the exact "alarm that fires when nothing is wrong" its own
 -- comment warns about, which trains you to ignore the one real case it exists to
 -- catch (4 Aug).
-Farmhand.VERSION = "2.19.6"
+Farmhand.VERSION = "2.19.7"
 
 local FAST_MS = 250      -- active vehicle
 local SLOW_MS = 2000     -- fleet, field, contracts
