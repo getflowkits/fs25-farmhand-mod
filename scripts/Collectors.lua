@@ -53,7 +53,13 @@ local function addOptional(p, key, v, fnName)
         return
     end
     p[#p + 1] = '"' .. key .. '":' .. js
-    FarmHandCollectors.noteStateOnce(fnName .. " ok -> " .. string.sub(tostring(js), 1, 160))
+    -- 160 is plenty for a state blob and useless for capabilities: a machine
+    -- registers dozens of actions and the interesting ones are never in the
+    -- first 160 characters, so every capabilities line in the log was cut off
+    -- before it said anything (3 Sep 2026). Deduped per distinct message, so a
+    -- longer line still costs ONE line per distinct machine.
+    local cap = fnName == "capabilitiesJson" and 1200 or 160
+    FarmHandCollectors.noteStateOnce(fnName .. " ok -> " .. string.sub(tostring(js), 1, cap))
 end
 
 --- JSON string escape. Vehicle and field names are user/mod supplied.

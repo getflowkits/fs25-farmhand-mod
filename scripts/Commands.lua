@@ -47,6 +47,57 @@ local function entryActionName(entry)
     return n
 end
 
+--- The human-readable text FS itself shows for an action event, if any.
+---
+--- Same shape as entryActionName above, reading contextDisplayText instead of
+--- actionName. That is the string the game puts in its own F1 help bar, so where
+--- it is filled in it is exactly what the player already reads in game.
+---
+--- DIAGNOSTIC ONLY for now (3 Sep 2026): the question is whether FS populates it
+--- for IMPLEMENT_EXTRA / EXTRA2 / EXTRA3, whose deck keys are stuck reading
+--- "Function 1/2/3" because what they do is entirely machine-defined. Registered
+--- is not the same as populated, and this whole plugin has been bitten twice
+--- this week by assuming an API answers - so it gets dumped and READ before
+--- anything is built on it.
+local function entryDisplayText(entry)
+    local t = nil
+    if type(entry) == "table" then
+        t = entry.contextDisplayText
+        if t == nil and g_inputBinding ~= nil and g_inputBinding.events ~= nil then
+            local ev = g_inputBinding.events[entry.actionEventId or entry[1]]
+            if type(ev) == "table" then t = ev.contextDisplayText end
+        end
+    elseif (type(entry) == "string" or type(entry) == "number")
+        and g_inputBinding ~= nil and g_inputBinding.events ~= nil then
+        local ev = g_inputBinding.events[entry]
+        if type(ev) == "table" then t = ev.contextDisplayText end
+    end
+    if type(t) ~= "string" or t == "" then return nil end
+    return t
+end
+
+--- JSON-escape a string. Local rather than borrowed from Collectors: this is
+--- localised GAME text on a machine that may be modded, so it can contain a
+--- quote or a backslash, and one unescaped character corrupts the whole frame
+--- for every key on the deck. Cross-file load order is not worth risking for it.
+local function jsonEsc(str)
+    str = tostring(str)
+    str = str:gsub("%\\", "\\\\"):gsub('"', '\\"'):gsub("\n", " "):gsub("\r", "")
+    return str
+end
+
+local dumpedDisplayText = {}
+
+--- Log actionName -> contextDisplayText once per distinct pair, for the actions
+--- whose deck label is generic. Once per pair, so driving around does not flood
+--- the log the way a per-frame dump would.
+local function noteDisplayText(name, text)
+    local key = tostring(name) .. "=" .. tostring(text)
+    if dumpedDisplayText[key] then return end
+    dumpedDisplayText[key] = true
+    log("LABEL %s -> %s", tostring(name), text == nil and "(none)" or ('"' .. text .. '"'))
+end
+
 local function dumpRegisteredActions(vehicle, missingName)
     if dumpedActions[missingName] then return end
     dumpedActions[missingName] = true
@@ -2372,7 +2423,7 @@ function FarmHandCommands.capabilitiesJson(v)
         log("CAPS recount %d -> %d action events, rebuilding", cached.sig, sig)
     end
 
-    local names, seen = {}, {}
+    local names, seen, labels = {}, {}, {}
     pcall(function()
         for _, obj in ipairs(candidates(v)) do
             for specName, spec in pairs(obj) do
@@ -2382,6 +2433,26 @@ function FarmHandCommands.capabilitiesJson(v)
                         if ok and type(n) == "string" and not seen[n] then
                             seen[n] = true
                             names[#names + 1] = n
+                            -- DIAGNOSTIC: is there a real name behind the generic
+                            -- "Function 1/2/3" keys? Logged for the extras only,
+                            -- plus a couple of knowns as a CONTROL - if DETACH
+                            -- also reports "(none)" then the field is simply not
+                            -- populated here and the answer is no, rather than
+                            -- the extras being special. A null result needs a
+                            -- control test.
+                            -- The generic "Function 1/2/3" keys are the reason
+                            -- this is here: what an extra DOES is entirely
+                            -- machine-defined, and FS knows the answer - it is
+                            -- the text in its own F1 help bar. Verified 3 Sep
+                            -- 2026 on a John Deere 1270G: "Turn on tree
+                            -- harvester", "Fold tree harvester", "Change cut
+                            -- length (5.0m)". Only the extras: every other key
+                            -- has a name that is true on every machine.
+                            if n:sub(1, 15) == "IMPLEMENT_EXTRA" then
+                                local ok2, t = pcall(entryDisplayText, entry)
+                                if ok2 and t ~= nil then labels[n] = t end
+                                noteDisplayText(n, ok2 and t or nil)
+                            end
                         end
                     end
                 end
@@ -2402,7 +2473,18 @@ function FarmHandCommands.capabilitiesJson(v)
 
     local quoted = {}
     for i, n in ipairs(names) do quoted[i] = '"' .. n .. '"' end
-    local json = string.format('{"actions":[%s],"canTip":%s}', table.concat(quoted, ","), tostring(canTip))
+    -- What the game itself calls each extra, so the deck can stop saying
+    -- "Function 1". Absent on a machine with no extras, and absent entirely from
+    -- an older mod - the plugin must treat a missing map as "no idea", not as
+    -- "no label", or every extra key goes blank on a multiplayer host running
+    -- an older copy.
+    local lbl = {}
+    for n, t in pairs(labels) do
+        lbl[#lbl + 1] = string.format('"%s":"%s"', n, jsonEsc(t))
+    end
+    table.sort(lbl)
+    local json = string.format('{"actions":[%s],"canTip":%s,"labels":{%s}}',
+        table.concat(quoted, ","), tostring(canTip), table.concat(lbl, ","))
     capsCache[v] = { sig = sig, json = json }
     return json
 end
