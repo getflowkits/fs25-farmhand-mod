@@ -25,7 +25,7 @@ Farmhand = {}
 -- EVERY session - the exact "alarm that fires when nothing is wrong" its own
 -- comment warns about, which trains you to ignore the one real case it exists to
 -- catch (4 Aug).
-Farmhand.VERSION = "2.19.7"
+Farmhand.VERSION = "2.19.8"
 
 local FAST_MS = 250      -- active vehicle
 local SLOW_MS = 2000     -- fleet, field, contracts
@@ -41,6 +41,7 @@ Farmhand.slowTimer = 0
 Farmhand.idleTimer = 0
 Farmhand.farmId = nil
 Farmhand.ready = false
+Farmhand.lateStartTried = false
 Farmhand.aiWatch = {}   -- vehicleKey -> stuck-detection state
 Farmhand.clockMs = 0    -- monotonic, accumulated from dt
 
@@ -232,7 +233,10 @@ local function onAiJobStopped(self, job, msg) sendAiEvent("stopped", job, msg) e
 
 -- ---------------------------------------------------------------- lifecycle
 
-function Farmhand:loadMap(name)
+--- Idempotent: runs from loadMap normally, or from the first update when
+--- loadMap never arrived (see Farmhand:update).
+function Farmhand:start()
+    if self.ready then return end
     log("FarmHand Telemetry %s starting", Farmhand.VERSION)
 
     self.transport = FarmHandTransport.new(Farmhand.VERSION)
@@ -252,7 +256,26 @@ function Farmhand:loadMap(name)
     self.ready = true
 end
 
+function Farmhand:loadMap(name)
+    self:start()
+end
+
 function Farmhand:update(dt)
+    -- loadMap CAN be skipped by another mod, silently. The game dispatches it
+    -- with pairs() over g_modEventListeners, and removeModEventListener does a
+    -- table.remove, so a mod that removes itself inside its own loadMap shifts
+    -- the NEXT listener into a slot the loop has already passed. That listener
+    -- stays registered (update still arrives) but never gets loadMap. Seen in
+    -- the field (Sep 2026): FS25_Employment does exactly this, and sorts right
+    -- before us, so the mod loaded with no error and never started. update only
+    -- runs once the mission is running, i.e. after the loadMap pass, so starting
+    -- here is safe. One attempt only: a throw would otherwise repeat every frame.
+    if not self.ready and not self.lateStartTried then
+        self.lateStartTried = true
+        log("loadMap never arrived (skipped by another mod), starting from update")
+        local ok, err = pcall(self.start, self)
+        if not ok then log("late start failed: %s", tostring(err)) end
+    end
     if not self.ready or self.transport == nil then return end
     self.transport:update(dt)
     self.clockMs = self.clockMs + dt
@@ -374,6 +397,7 @@ function Farmhand:deleteMap()
     -- duplicate alerts and phantom "double stop" readings.
     pcall(function() g_messageCenter:unsubscribeAll(self) end)
     self.ready = false
+    self.lateStartTried = false
 end
 
 addModEventListener(Farmhand)
