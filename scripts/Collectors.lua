@@ -797,7 +797,7 @@ function FarmHandCollectors.bestPrices(wanted, limit)
                         if type(price) == "number" and price > 0 then
                             local cur = best[ftName]
                             if cur == nil or price > cur.price then
-                                best[ftName] = { price = price, station = name }
+                                best[ftName] = { price = price, station = name, index = ftIdx }
                             end
                         end
                     end
@@ -806,11 +806,34 @@ function FarmHandCollectors.bestPrices(wanted, limit)
         end)
     end
 
-    local out = {}
+    -- Crops first, then everything else, each ALPHABETICAL, and only THEN cap.
+    -- The old loop capped a pairs() walk, which has no order, so the deck's
+    -- "Best prices" showed an arbitrary set in no order (fixed 21 Oct 2026).
+    -- Alphabetical, not by price: the list answers "where do I sell my wheat",
+    -- and a price per litre is not comparable across crops whose yields differ.
+    -- Crops lead because they are what a farm sells, and the cap must never
+    -- push one off in favour of a factory good.
+    -- A crop is a fill type the game maps to a fruit type (FruitTypeManager.lua:360).
+    local rows = {}
     for ftName, rec in pairs(best) do
-        if #out >= (limit or 12) then break end
+        local crop = false
+        pcall(function()
+            crop = g_fruitTypeManager:getFruitTypeIndexByFillTypeIndex(rec.index) ~= nil
+        end)
+        rows[#rows + 1] = { name = ftName, price = rec.price, station = rec.station, crop = crop }
+    end
+    table.sort(rows, function(a, b)
+        if a.crop ~= b.crop then return a.crop end
+        return a.name < b.name
+    end)
+
+    local out = {}
+    -- The cap is a payload guard, not a selection: an alphabetical list cut at
+    -- row 32 stopped at "B" and hid milk, eggs and wool (seen live 21 Oct 2026).
+    for i = 1, math.min(#rows, limit or 200) do
+        local r = rows[i]
         out[#out + 1] = string.format('{"type":"%s","price":%.2f,"station":"%s"}',
-            esc(ftName), num(rec.price), esc(rec.station))
+            esc(r.name), num(r.price), esc(r.station))
     end
     return "[" .. table.concat(out, ",") .. "]"
 end
@@ -973,12 +996,27 @@ function FarmHandCollectors.world(farmId)
         if env.currentDay ~= nil then add("day", num(env.currentDay)) end
         -- currentPeriod (1-12) indexes the seasonal price curve
         if env.currentPeriod ~= nil then add("period", num(env.currentPeriod)) end
-        local w = env.weather
-        if w ~= nil then
-            if type(w.getCurrentWeatherType) == "function" then add("weather", num(w:getCurrentWeatherType())) end
-            if type(w.getNextWeatherType) == "function" then add("weatherNext", num(w:getNextWeatherType())) end
-            if type(w.getCurrentTemperature) == "function" then add("temp", string.format("%.1f", num(w:getCurrentTemperature()))) end
-        end
     end)
+    -- One pcall per reading. They used to share the one above, so when the
+    -- next-weather call threw, temperature went with it and the log said nothing
+    -- (live telemetry carried `weather` and never `weatherNext` or `temp`).
+    -- A throw is noted once with the game's own error text, so one in-game
+    -- session says why rather than a key that never updates.
+    local w = nil
+    pcall(function() w = g_currentMission.environment.weather end)
+    if w ~= nil then
+        local function reading(key, method, fmt)
+            if type(w[method]) ~= "function" then return end
+            local ok, v = pcall(w[method], w)
+            if not ok then
+                FarmHandCollectors.noteStateOnce(key .. " THREW: " .. tostring(v))
+                return
+            end
+            add(key, fmt(v))
+        end
+        reading("weather", "getCurrentWeatherType", num)
+        reading("weatherNext", "getNextWeatherType", num)
+        reading("temp", "getCurrentTemperature", function(v) return string.format("%.1f", num(v)) end)
+    end
     return "{" .. table.concat(p, ",") .. "}"
 end

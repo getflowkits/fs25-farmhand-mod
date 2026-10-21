@@ -25,7 +25,7 @@ Farmhand = {}
 -- EVERY session - the exact "alarm that fires when nothing is wrong" its own
 -- comment warns about, which trains you to ignore the one real case it exists to
 -- catch (4 Aug).
-Farmhand.VERSION = "2.19.8"
+Farmhand.VERSION = "2.19.9"
 
 local FAST_MS = 250      -- active vehicle
 local SLOW_MS = 2000     -- fleet, field, contracts
@@ -364,9 +364,12 @@ function Farmhand:update(dt)
             -- lasts at least a full in-game day)
             local season = C.season()
             if season ~= nil then bits[#bits + 1] = '"season":' .. season end
-            bits[#bits + 1] = '"husbandries":' .. C.husbandries(self.farmId, 8)
-            bits[#bits + 1] = '"productions":' .. C.productions(self.farmId, 8)
-            bits[#bits + 1] = '"prices":' .. C.bestPrices(nil, 12)
+            -- 50, not 8: both collectors cap an unordered walk of the farm's
+            -- placeables, so a farm with more than 8 got an arbitrary 8, and the
+            -- deck lists them alphabetically, where a missing pen just looks absent
+            bits[#bits + 1] = '"husbandries":' .. C.husbandries(self.farmId, 50)
+            bits[#bits + 1] = '"productions":' .. C.productions(self.farmId, 50)
+            bits[#bits + 1] = '"prices":' .. C.bestPrices(nil, 200)
             return "{" .. table.concat(bits, ",") .. "}"
         end)
         if not ok then self:reportTierFail("IDLE", payload) end

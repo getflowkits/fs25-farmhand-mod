@@ -69,7 +69,9 @@ The shape inside each key (`world`, `vehicle`, `fleet`, and so on) is produced b
 That file is the reference, and it is written to be read.
 The quickest way to see the live shape for your own save is to load a game with the mod enabled and open `telemetry.json`.
 
-Lists are capped: `fleet` at 99 entries, `contracts` at 6, `husbandries` and `productions` at 8, `prices` at 12.
+Lists are capped: `fleet` at 99 entries, `contracts` at 6, `husbandries` and `productions` at 50, `prices` at 200 (in practice every sellable fill type: an alphabetical list is only useful complete).
+`prices` lists crops first, then every other fill type, each alphabetical by fill type name, with the best price and the station that pays it.
+Prices are per litre, as the game reports them; the game's own price screen shows them per 1,000 litres.
 Everything farm-specific is filtered to the local player's own farm.
 `prices` is not, because selling station prices are public to every player on the map.
 
