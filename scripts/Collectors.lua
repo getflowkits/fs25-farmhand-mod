@@ -63,9 +63,12 @@ local function addOptional(p, key, v, fnName)
 end
 
 --- JSON string escape. Vehicle and field names are user/mod supplied.
+--- Any other control character (a tab in a mod's store name, a stray byte in a
+--- localised mission description) is not legal inside a JSON string either, so
+--- it becomes a space: one bad name must not fail the parse for the whole frame.
 local function esc(s)
     s = tostring(s)
-    s = s:gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", " "):gsub("\r", "")
+    s = s:gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", " "):gsub("\r", ""):gsub("%c", " ")
     return s
 end
 
@@ -97,14 +100,34 @@ end
 --- VERIFIED: store categoryName is the ONLY reliable class signal.
 --- typeName reports wheel loaders as "tractor"; spec_cylindered matches
 --- literally every vehicle. Do not use either for class detection.
+---
+--- Cached per vehicle: a machine's store entry never changes, and the fleet
+--- (2 s), the active vehicle (4 Hz) and the widget's frames all ask, so the
+--- store manager was searched for every vehicle on every fleet tick. An entry
+--- holds the config file it was read for, so a vehicle object reused for
+--- another config re-reads; the keys are weak, so a removed vehicle drops out;
+--- and resetCaches empties it when the save or the farm changes. A lookup made
+--- before the store manager is up is not cached.
+local categoryCache = setmetatable({}, { __mode = "k" })
+
 function FarmHandCollectors.storeCategory(vehicle)
-    local cat = nil
+    if type(vehicle) ~= "table" then return nil end
+    local hit = categoryCache[vehicle]
+    if hit ~= nil and hit.config == vehicle.configFileName then return hit.cat or nil end
+    local cat, looked = nil, false
     pcall(function()
         if vehicle.configFileName == nil or g_storeManager == nil then return end
         local item = g_storeManager:getItemByXMLFilename(vehicle.configFileName)
+        looked = true
         if item ~= nil and item.categoryName ~= nil then cat = tostring(item.categoryName) end
     end)
+    if looked then categoryCache[vehicle] = { config = vehicle.configFileName, cat = cat or false } end
     return cat
+end
+
+--- Empty the per-vehicle caches (mission end, farm change).
+function FarmHandCollectors.resetCaches()
+    categoryCache = setmetatable({}, { __mode = "k" })
 end
 
 local LOADER_CATEGORIES = {
@@ -430,6 +453,24 @@ function FarmHandCollectors.fleet(farmId, limit)
     return string.format('{"items":[%s],"total":%d}', table.concat(out, ","), total)
 end
 
+--- Is this the machine a worker drives, rather than something hitched to it?
+---
+--- In-game 22 Oct: a hitched cultivator (John Deere 980) answered
+--- getIsAIActive() true alongside its tractor, so it was listed as a second
+--- worker and raised its own stuck alert. Only the root of a vehicle train
+--- carries the job. getRootVehicle() is the game's own answer (rootVehicle is
+--- the field behind it); a vehicle that answers neither falls back to "does it
+--- hold a job itself".
+function FarmHandCollectors.isWorkerVehicle(v)
+    local root = nil
+    pcall(function() root = v:getRootVehicle() end)
+    if root == nil then pcall(function() root = v.rootVehicle end) end
+    if root ~= nil then return root == v end
+    local job = nil
+    pcall(function() job = v:getJob() end)
+    return job ~= nil
+end
+
 --- Detect AI workers that are hired but making NO progress.
 ---
 --- VERIFIED 22 Jul: FS fires no event whatsoever for a blocked or stuck worker.
@@ -456,7 +497,7 @@ function FarmHandCollectors.checkStuck(farmId, watch, nowMs, stuckMs)
         pcall(function() owned = (v.ownerFarmId == farmId) end)
         pcall(function() ai = (type(v.getIsAIActive) == "function") and v:getIsAIActive() == true end)
 
-        if owned and ai then
+        if owned and ai and FarmHandCollectors.isWorkerVehicle(v) then
             local key = tostring(v.rootNode or v)
             seen[key] = true
 
@@ -620,46 +661,66 @@ end
 
 -- ---------------------------------------------------------------- farm state
 
+--- The farm's animal pens, in the placeable system's order. One walk for the
+--- plugin's estate frame and the widget's sites frame (EdgeCollectors.lua), so
+--- both always name the same pens.
+function FarmHandCollectors.farmHusbandries(farmId)
+    local list = {}
+    local placeables = nil
+    pcall(function() placeables = g_currentMission.placeableSystem.placeables end)
+    if placeables == nil then return list end
+    for _, pl in pairs(placeables) do
+        if pl.spec_husbandryAnimals ~= nil then
+            local owned = false
+            pcall(function() owned = (pl.ownerFarmId == farmId) end)
+            if owned then list[#list + 1] = pl end
+        end
+    end
+    return list
+end
+
+--- The farm's production points (productionChainManager), shared the same way.
+function FarmHandCollectors.farmProductionPoints(farmId)
+    local list = {}
+    local pcm = g_currentMission ~= nil and g_currentMission.productionChainManager or nil
+    if pcm == nil then return list end
+    local points = nil
+    pcall(function() points = pcm:getProductionPointsForFarmId(farmId) end)
+    if points == nil then return list end
+    for _, pp in pairs(points) do list[#list + 1] = pp end
+    return list
+end
+
 --- Animal pens. VERIFIED: litersPerHour is LIVE and scales with herd size,
 --- so level/rate gives an accurate "empty in Xh" rather than an estimate.
 function FarmHandCollectors.husbandries(farmId, limit)
     local out = {}
-    local placeables = nil
-    pcall(function() placeables = g_currentMission.placeableSystem.placeables end)
-    if placeables == nil then return "[]" end
-
-    for _, pl in pairs(placeables) do
+    for _, pl in ipairs(FarmHandCollectors.farmHusbandries(farmId)) do
         if #out >= (limit or 8) then break end
-        if pl.spec_husbandryAnimals ~= nil then
-            local owned = false
-            pcall(function() owned = (pl.ownerFarmId == farmId) end)
-            if owned then
-                local bits = {}
-                pcall(function() bits[#bits + 1] = string.format('"name":"%s"', esc(pl:getName())) end)
-                pcall(function() bits[#bits + 1] = string.format('"animals":%d', num(pl:getNumOfAnimals())) end)
-                pcall(function() bits[#bits + 1] = string.format('"maxAnimals":%d', num(pl:getMaxNumOfAnimals())) end)
-                pcall(function() bits[#bits + 1] = string.format('"productivity":%.3f', num(pl:getGlobalProductionFactor())) end)
-                -- food: sum levels across supported types, plus the live rate
-                pcall(function()
-                    local sf = pl.spec_husbandryFood
-                    if sf == nil then return end
-                    local total = 0
-                    if type(sf.fillLevels) == "table" then
-                        for _, lvl in pairs(sf.fillLevels) do total = total + num(lvl) end
-                    end
-                    bits[#bits + 1] = string.format('"food":%.0f', total)
-                    bits[#bits + 1] = string.format('"foodCap":%.0f', num(sf.capacity))
-                    bits[#bits + 1] = string.format('"foodPerHour":%.3f', num(sf.litersPerHour))
-                end)
-                pcall(function()
-                    local sw = pl.spec_husbandryWater
-                    if sw == nil then return end
-                    bits[#bits + 1] = string.format('"waterPerHour":%.3f', num(sw.litersPerHour))
-                    bits[#bits + 1] = string.format('"waterAuto":%s', tostring(sw.automaticWaterSupply == true))
-                end)
-                out[#out + 1] = "{" .. table.concat(bits, ",") .. "}"
+        local bits = {}
+        pcall(function() bits[#bits + 1] = string.format('"name":"%s"', esc(pl:getName())) end)
+        pcall(function() bits[#bits + 1] = string.format('"animals":%d', num(pl:getNumOfAnimals())) end)
+        pcall(function() bits[#bits + 1] = string.format('"maxAnimals":%d', num(pl:getMaxNumOfAnimals())) end)
+        pcall(function() bits[#bits + 1] = string.format('"productivity":%.3f', num(pl:getGlobalProductionFactor())) end)
+        -- food: sum levels across supported types, plus the live rate
+        pcall(function()
+            local sf = pl.spec_husbandryFood
+            if sf == nil then return end
+            local total = 0
+            if type(sf.fillLevels) == "table" then
+                for _, lvl in pairs(sf.fillLevels) do total = total + num(lvl) end
             end
-        end
+            bits[#bits + 1] = string.format('"food":%.0f', total)
+            bits[#bits + 1] = string.format('"foodCap":%.0f', num(sf.capacity))
+            bits[#bits + 1] = string.format('"foodPerHour":%.3f', num(sf.litersPerHour))
+        end)
+        pcall(function()
+            local sw = pl.spec_husbandryWater
+            if sw == nil then return end
+            bits[#bits + 1] = string.format('"waterPerHour":%.3f', num(sw.litersPerHour))
+            bits[#bits + 1] = string.format('"waterAuto":%s', tostring(sw.automaticWaterSupply == true))
+        end)
+        out[#out + 1] = "{" .. table.concat(bits, ",") .. "}"
     end
     return "[" .. table.concat(out, ",") .. "]"
 end
@@ -667,14 +728,8 @@ end
 --- Owned production points. VERIFIED: read levels via storage:getFillLevel,
 --- NOT pp.inputFillLevels (that table reads empty even after a successful write).
 function FarmHandCollectors.productions(farmId, limit)
-    local pcm = g_currentMission ~= nil and g_currentMission.productionChainManager or nil
-    if pcm == nil then return "[]" end
-    local points = nil
-    pcall(function() points = pcm:getProductionPointsForFarmId(farmId) end)
-    if points == nil then return "[]" end
-
     local out = {}
-    for _, pp in pairs(points) do
+    for _, pp in ipairs(FarmHandCollectors.farmProductionPoints(farmId)) do
         if #out >= (limit or 8) then break end
         local bits = {}
         pcall(function()
@@ -925,6 +980,46 @@ function FarmHandCollectors.season()
     return "{" .. table.concat(p, ",") .. "}"
 end
 
+--- The WeatherType index (1 SUN .. 8 THUNDER, in-game 22 Oct) of one forecast
+--- item, or nil.
+---
+--- In-game 22 Oct: weather.forecastItems[i] carries startDay, startDayTime,
+--- duration, objectIndex, variationIndex and season, and weather.weatherObjects
+--- exists. An item names its weather object by (season, objectIndex), and the
+--- object carries the type, which is how the game's own getCurrentWeatherType
+--- reads item 1. The method is tried first, the table it reads second.
+function FarmHandCollectors.forecastItemType(w, item)
+    if type(w) ~= "table" or type(item) ~= "table" then return nil end
+    local obj = nil
+    pcall(function()
+        if type(w.getWeatherObjectByIndex) == "function" then obj = w:getWeatherObjectByIndex(item.season, item.objectIndex) end
+    end)
+    if obj == nil then
+        pcall(function() obj = w.weatherObjects[item.season][item.objectIndex] end)
+    end
+    local t = nil
+    pcall(function()
+        local wt = obj.weatherType
+        if type(wt) == "table" then t = wt.index elseif type(wt) == "number" then t = wt end
+    end)
+    if type(t) == "number" then return t end
+    return nil
+end
+
+--- The weather after the current one: forecast item 2, the item the game's own
+--- getNextWeatherType answers with for any time past its start.
+---
+--- Not getNextWeatherType itself. In-game 21 Oct it threw inside Weather.lua:912
+--- ("attempt to compare nil < number") when called with no arguments, because it
+--- takes a day and a time, and two FS25 mods that call it pass them in opposite
+--- orders. Reading the forecast list needs neither.
+function FarmHandCollectors.nextWeatherType(w)
+    local items = nil
+    pcall(function() items = w.forecastItems end)
+    if type(items) ~= "table" or items[2] == nil then return nil end
+    return FarmHandCollectors.forecastItemType(w, items[2])
+end
+
 --- Farm-level and world state. Cheap, so sent on every frame.
 function FarmHandCollectors.world(farmId)
     local p = {}
@@ -1015,7 +1110,12 @@ function FarmHandCollectors.world(farmId)
             add(key, fmt(v))
         end
         reading("weather", "getCurrentWeatherType", num)
-        reading("weatherNext", "getNextWeatherType", num)
+        local okNext, nextType = pcall(FarmHandCollectors.nextWeatherType, w)
+        if okNext and nextType ~= nil then
+            add("weatherNext", num(nextType))
+        else
+            FarmHandCollectors.noteStateOnce("weatherNext unreadable: " .. tostring(okNext and "no forecast item 2" or nextType))
+        end
         reading("temp", "getCurrentTemperature", function(v) return string.format("%.1f", num(v)) end)
     end
     return "{" .. table.concat(p, ",") .. "}"

@@ -634,7 +634,51 @@ local function driveTool(obj, tool, value)
 end
 
 --- Called every frame from the telemetry update so a pulse can span frames.
+-- A list row to bring into view over the next few frames (see selectPriceRow).
+local pendingScroll = nil
+
+--- Where a list cell sits against the list's view, from SmoothListElement's
+--- own fields (FS25 source: sections[s].itemOffsets, viewOffset,
+--- targetViewOffset, contentSize, absSize[lengthAxis], isMovingToTarget).
+--- Returns whether it is in view, the offset that would centre it, and a line
+--- for the log.
+local function listCellPlacement(list, s, i)
+    local sec = list.sections[s]
+    local start = sec.itemOffsets[i]
+    local nextStart = sec.itemOffsets[i + 1]
+    local stop = nextStart or sec.endOffset or start
+    local viewSize = list.absSize[list.lengthAxis]
+    local view = list.viewOffset
+    local inView = start >= view and stop <= view + viewSize
+    local maxOffset = math.max(0, (list.contentSize or 0) - viewSize)
+    local centre = math.max(0, math.min(maxOffset, start - (viewSize - (stop - start)) / 2))
+    local info = string.format("cell %.4f-%.4f view %.4f+%.4f target %s content %s moving %s",
+        start, stop, view, viewSize, tostring(list.targetViewOffset), tostring(list.contentSize), tostring(list.isMovingToTarget))
+    return inView, centre, info
+end
+
 function FarmHandCommands.updatePulses(dtMs)
+    if pendingScroll ~= nil then
+        local p = pendingScroll
+        p.frames = p.frames - 1
+        -- fast = true: SmoothListElement:makeCellVisible(section, index, fast)
+        -- jumps with scrollTo instead of handing the move to the list's own
+        -- per-frame smoothing (FS22 and FS25 source). The smooth path is what
+        -- setSelectedItem takes, and it never moved the view in game (22 Oct).
+        pcall(function() p.list:makeCellVisible(p.s, p.i, true) end)
+        -- Still out of view: place it from the list's own offsets, centred.
+        -- UNPROVEN in game; the log line below says what the list held.
+        local ok, inView, centre, info = pcall(listCellPlacement, p.list, p.s, p.i)
+        if ok and not inView then
+            pcall(function() p.list:scrollTo(centre, true) end)
+        end
+        if p.first or p.frames <= 0 then
+            p.first = false
+            log("openPrices: scroll %s: %s", p.frames <= 0 and "after" or "before",
+                ok and tostring(info) or ("unreadable: " .. tostring(inView)))
+        end
+        if p.frames <= 0 then pendingScroll = nil end
+    end
     for i = #activePulses, 1, -1 do
         local p = activePulses[i]
         p.remain = p.remain - (dtMs or 0)
@@ -928,6 +972,11 @@ end
 --- key switches page instead of closing. If we can't tell whether the menu is
 --- open, this degrades to plain "open", which is the safe direction.
 local lastMenuPage = nil
+-- The Edge widget's menu taps OPEN a page, never close it: a tap on a widget is
+-- "show me this", and closing the menu because it happened to be open already
+-- reads as the tap failing. Set by execute for widget commands only; the
+-- Stream Deck keys keep their toggle.
+local openOnly = false
 
 local function openMenuPage(pageField)
     local ok = false
@@ -948,7 +997,7 @@ local function openMenuPage(pageField)
             end
         end)
 
-        if isOpen and lastMenuPage == pageField then
+        if isOpen and lastMenuPage == pageField and not openOnly then
             g_gui:showGui("")   -- same key again: close
             lastMenuPage = nil
             ok = true
@@ -1010,6 +1059,15 @@ local function selectPriceRow(page, wanted)
                 local n = type(ft) == "table" and ft.name or nil
                 if type(n) == "string" and string.upper(n) == want then
                     pcall(function() list:setSelectedItem(s, i) end)
+                    -- setSelectedItem does not scroll: a crop low in the list was
+                    -- selected (the station panel showed it) but off screen
+                    -- (in-game, 22 Oct). It does ask for a scroll, but a SMOOTH one
+                    -- that never moved the view in game, so the scroll is made
+                    -- directly over the next frames, after the page has laid
+                    -- itself out (see updatePulses).
+                    if type(list.makeCellVisible) == "function" then
+                        pendingScroll = { list = list, s = s, i = i, frames = 10, first = true }
+                    end
                     -- the station panel only repopulates from the selection
                     -- callback, which setSelectedItem may not raise
                     pcall(function() page:onListSelectionChanged(list, s, i) end)
@@ -1040,7 +1098,7 @@ local function openPricesPage(fillTypeName)
         pcall(function()
             if g_gui.currentGuiName ~= nil then isOpen = (g_gui.currentGuiName == "InGameMenu") end
         end)
-        if isOpen and lastMenuPage == "pagePrices" then
+        if isOpen and lastMenuPage == "pagePrices" and not openOnly then
             -- Already looking at prices. Pressing on a DIFFERENT crop means "show
             -- me that one", not "close" - the user scrubbed the dial to get here.
             -- Only a press on the SAME crop is the close half of the toggle.
@@ -1130,7 +1188,7 @@ local function openProductionPage(name)
     end)
     -- Same rule as prices: while the screen is open, pressing a DIFFERENT item
     -- switches to it; only the same item again closes.
-    if isOpen and lastMenuPage == "pageProduction" then
+    if isOpen and lastMenuPage == "pageProduction" and not openOnly then
         if lastProductionName ~= nil and string.upper(lastProductionName) == string.upper(name) then
             g_gui:showGui("")
             lastMenuPage = nil
@@ -1348,7 +1406,7 @@ local function openFocusedPage(pageField, listNames, preferredArrays, wanted, la
         end)
         -- Same press rule as prices/production: a different item switches to it,
         -- the same item again closes.
-        if isOpen and lastMenuPage == pageField then
+        if isOpen and lastMenuPage == pageField and not openOnly then
             -- A key with NO item ("Jobs", "Animals") is a plain open/close, so a
             -- second press must close it - the same rule Shop and Map already
             -- follow. Requiring a matching item meant `same` was never true for
@@ -1383,11 +1441,11 @@ end
 --- the walk). Found by trying the plausible APIs and logging which took.
 local function enterVehicle(_, _, arg)
     local id = tonumber(arg)
-    if id == nil then log("enterVehicle: no vehicle id") return false end
+    if id == nil then log("enterVehicle: no vehicle id") return false, "Not found" end
 
     local veh = nil
     pcall(function() veh = NetworkUtil.getObject(id) end)
-    if veh == nil then log("enterVehicle: id %s did not resolve to a vehicle", tostring(id)) return false end
+    if type(veh) ~= "table" then log("enterVehicle: id %s did not resolve to a vehicle", tostring(id)) return false, "Not found" end
 
     -- Only ENTERABLE things have a cab. A plough or header resolves fine but is
     -- not something you sit in, so refuse rather than fire an enter request at
@@ -1395,11 +1453,11 @@ local function enterVehicle(_, _, arg)
     -- mod refuses regardless of who calls it.)
     if veh.spec_enterable == nil then
         log("enterVehicle: id %s is not enterable (no cab), ignoring", tostring(id))
-        return false
+        return false, "No cab"
     end
     if g_localPlayer == nil or type(g_localPlayer.requestToEnterVehicle) ~= "function" then
         log("enterVehicle: requestToEnterVehicle unavailable")
-        return false
+        return false, "Not available"
     end
 
     local name = "?"
@@ -2274,6 +2332,19 @@ local HANDLERS = {
     -- Kept as an alias to the cycle so an old profile does not have a dead key.
     pause      = function() return cycleTimeScale() end,
     timeCycle  = function() return cycleTimeScale() end,
+    -- An exact speed, for the Edge widget's speed chip (value: the time scale).
+    -- In-game 22 Oct: g_currentMission:setTimeScale(5) reads back 5. Only the
+    -- host may change the speed in multiplayer, so a client is refused by name
+    -- rather than left wondering why nothing happened.
+    setTimeScale = function(_, value)
+        local m = g_currentMission
+        if m == nil or type(value) ~= "number" or value < 1 or value > 120 then return false, "Not available" end
+        local server = true
+        pcall(function() server = m:getIsServer() end)
+        if not server then return false, "Host only" end
+        local ok = pcall(function() m:setTimeScale(value) end)
+        return ok
+    end,
     menu       = function() return toggleInGameMenu() end,
     screenshot = function(v) return raiseAny(v, "TAKE_SCREENSHOT") end,
     mapToggle  = function(v) return raiseAny(v, "TOGGLE_MAP") end,
@@ -2300,6 +2371,11 @@ local HANDLERS = {
     openMap = function() return openMenuPage("pageMapOverview") end,
     openStats = function() return openMenuPage("pageStatistics") end,
     openPrices = function(_, _, arg) return openPricesPage(arg) end,
+    -- DIAGNOSTICS for the Edge widget (scripts/Probe.lua): read-only, except the
+    -- time-scale check, which restores the speed it found.
+    probeReport = function() return FarmHandProbe ~= nil and FarmHandProbe.report(Farmhand.farmId) end,
+    probeReport2 = function() return FarmHandProbe ~= nil and FarmHandProbe.report2(Farmhand.farmId) end,
+    probeTimeScale = function(_, v) return FarmHandProbe ~= nil and FarmHandProbe.timeScale(v ~= 0 and v or 5) end,
     -- The shop is its own top-level GUI, not a page of InGameMenu (VERIFIED:
     -- g_gui.guis holds both "InGameMenu" and "ShopMenu"), so it needs its own
     -- open rather than goToPage.
@@ -2309,7 +2385,7 @@ local HANDLERS = {
             if g_gui == nil or g_gui.guis == nil or g_gui.guis["ShopMenu"] == nil then return end
             local isOpen = false
             pcall(function() isOpen = (g_gui.currentGuiName == "ShopMenu") end)
-            if isOpen then g_gui:showGui("") else g_gui:showGui("ShopMenu") end
+            if isOpen and not openOnly then g_gui:showGui("") elseif not isOpen then g_gui:showGui("ShopMenu") end
             ok = true
         end)
         return ok
@@ -2333,39 +2409,59 @@ local NO_VEHICLE = {
     dumpFillTypes = true,
     -- menu commands are UI, not vehicle actions
     dumpMenu = true, openPrices = true,
+    probeReport = true, probeReport2 = true, probeTimeScale = true,
     -- On-foot and session actions. These are registered globally, so requiring a
     -- vehicle would make the whole ON-FOOT page dead the moment you step out.
     handtoolCycle = true, handtoolToggle = true, handtoolPress = true, handtoolRelease = true, buildMode = true, flashlight = true,
-    timeUp = true, timeDown = true, timeCycle = true, pause = true, menu = true, screenshot = true,
+    timeUp = true, timeDown = true, timeCycle = true, setTimeScale = true, pause = true, menu = true, screenshot = true,
     mapToggle = true, mapSize = true, helpToggle = true,
     radioToggle = true, radioNext = true, radioPrev = true, radioChannel = true,
     switchVehicle = true, switchVehicleBack = true, enterExit = true,
 }
 
+--- Add a handler from another file (EdgeCommands.lua, the widget's commands).
+--- Every one registered this way acts on the game or the menu, never on the
+--- controlled vehicle, so it is allowed on foot.
+function FarmHandCommands.register(name, fn)
+    HANDLERS[name] = fn
+    NO_VEHICLE[name] = true
+end
+
+--- The menu opener, for EdgeCommands.lua. It honours openOnly like every page
+--- key here, so a widget tap never closes the page it asked for.
+FarmHandCommands.openMenuPage = openMenuPage
+
 --- Execute a command table { name, value }. Logs the outcome once.
+-- Returns true, or false and a short reason the widget shows on its button
+-- ("Not in a vehicle"). The plugin ignores the result, as it always has.
 function FarmHandCommands.execute(cmd)
-    if cmd == nil or cmd.name == nil then return end
+    if cmd == nil or cmd.name == nil then return false, "No command" end
     local handler = HANDLERS[cmd.name]
     if handler == nil then
         log("unknown command '%s'", tostring(cmd.name))
-        return
+        return false, "Not supported"
     end
     local v = getControlled()
     if v == nil and not NO_VEHICLE[cmd.name] then
         log("command '%s' ignored: not in a vehicle", cmd.name)
-        return
+        return false, "Not in a vehicle"
     end
-    local ok, result = pcall(handler, v, cmd.value, cmd.arg)
+    openOnly = (cmd.source == "edge")
+    local ok, result, reason = pcall(handler, v, cmd.value, cmd.arg)
+    openOnly = false
     if not ok then
         log("command '%s' errored: %s", cmd.name, tostring(result))
+        return false, "Error"
     elseif result == false then
         log("command '%s' had no effect (no direct fn or action)", cmd.name)
+        return false, reason or "Not available"
     elseif not HIGH_RATE[cmd.name] then
         -- Success is logged for one-shot commands only. A dial sends a command
         -- per tick, so "ok" on every one would flood the player's log during
         -- ordinary use. Failures always log, at any rate.
         log("command '%s' ok", cmd.name)
     end
+    return true
 end
 
 -- ---------------------------------------------------------------- capability

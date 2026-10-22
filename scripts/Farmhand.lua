@@ -25,7 +25,7 @@ Farmhand = {}
 -- EVERY session - the exact "alarm that fires when nothing is wrong" its own
 -- comment warns about, which trains you to ignore the one real case it exists to
 -- catch (4 Aug).
-Farmhand.VERSION = "2.19.9"
+Farmhand.VERSION = "2.20.0"
 
 local FAST_MS = 250      -- active vehicle
 local SLOW_MS = 2000     -- fleet, field, contracts
@@ -43,6 +43,11 @@ Farmhand.farmId = nil
 Farmhand.ready = false
 Farmhand.lateStartTried = false
 Farmhand.aiWatch = {}   -- vehicleKey -> stuck-detection state
+-- network vehicle id -> the last stop the game reported for it, for the widget's
+-- workers frame (EdgeCollectors.lua): a stopped or finished worker is a STATE
+-- there ("Idle, finished field 9"), not only an event. Cleared when the machine
+-- is hired again, sold, or the player gets in.
+Farmhand.aiStops = {}
 Farmhand.clockMs = 0    -- monotonic, accumulated from dt
 
 local function log(fmt, ...)
@@ -75,7 +80,14 @@ local AI_MESSAGE_CLASSES = {
     "AIMessageErrorNoFieldFound", "AIMessageErrorCannotFindPath",
     "AIMessageErrorVehicleDeleted", "AIMessageErrorWrongBaleType",
     "AIMessageSuccessStoppedByUser", "AIMessageSuccessFinishedJob",
-    "AIMessageSuccessWorkFinished", "AIMessageErrorUnknown",
+    "AIMessageSuccessWorkFinished",
+    -- every one below confirmed as a global by the in-game probe, 22 Oct
+    "AIMessageErrorFieldNotReady", "AIMessageErrorUnloadingStationFull",
+    "AIMessageErrorWrongSeason", "AIMessageErrorNotReachable", "AIMessageErrorOutOfMoney",
+    "AIMessageErrorNoValidFillTypeLoaded", "AIMessageErrorLoadingStationDeleted",
+    "AIMessageErrorUnloadingStationDeleted",
+    "AIMessageErrorThreshingNotAllowed", "AIMessageErrorFieldNotOwned",
+    "AIMessageErrorUnknown",
     -- bases last: they classify severity when the exact cause is unlisted
     "AIMessageError", "AIMessageSuccess",
 }
@@ -228,8 +240,44 @@ local function sendStuckEvent(name, secs)
     t:send("{" .. table.concat(bits, ",") .. "}")
 end
 
-local function onAiJobStarted(self, job) sendAiEvent("started", job, nil) end
-local function onAiJobStopped(self, job, msg) sendAiEvent("stopped", job, msg) end
+--- The vehicle's network id from the job (VERIFIED 22 Jul: vehicleParameter
+--- carries {isValid, type, vehicleId}), or nil.
+local function jobVehicleId(job)
+    local vid = nil
+    pcall(function() vid = job.vehicleParameter.vehicleId end)
+    return vid
+end
+
+--- Remember why a worker stopped, in game time, for the widget's workers frame.
+--- A dismissal by the player is not kept: the worker is simply gone.
+local function recordStop(job, msg)
+    local vid = jobVehicleId(job)
+    if vid == nil then return end
+    local className = identifyAiMessage(msg)
+    if className == "AIMessageSuccessStoppedByUser" then
+        Farmhand.aiStops[vid] = nil
+        return
+    end
+    local rec = { class = className, severity = severityFor("stopped", msg, className) }
+    pcall(function()
+        if type(msg) == "table" and type(msg.getI18NText) == "function" then rec.text = msg:getI18NText() end
+    end)
+    pcall(function()
+        local env = g_currentMission.environment
+        rec.day, rec.hour, rec.minute = env.currentDay, env.currentHour, env.currentMinute
+    end)
+    Farmhand.aiStops[vid] = rec
+end
+
+local function onAiJobStarted(self, job)
+    local vid = jobVehicleId(job)
+    if vid ~= nil then Farmhand.aiStops[vid] = nil end
+    sendAiEvent("started", job, nil)
+end
+local function onAiJobStopped(self, job, msg)
+    pcall(recordStop, job, msg)
+    sendAiEvent("stopped", job, msg)
+end
 
 -- ---------------------------------------------------------------- lifecycle
 
@@ -282,9 +330,10 @@ function Farmhand:update(dt)
 
     -- poll for a command from the plugin and execute it directly (no keystrokes).
     -- checked every frame; the file only exists briefly when a command is pending.
-    local cmd = self.transport:pollCommand()
-    if cmd ~= nil then
-        pcall(FarmHandCommands.execute, cmd)
+    -- one pending command per listener (plugin, widget), each from its own file
+    for _, cmd in ipairs(self.transport:pollCommands()) do
+        local pok, ok, reason = pcall(FarmHandCommands.execute, cmd)
+        self.transport:ack(cmd, pok and ok == true, (not pok) and "Error" or reason)
     end
 
     -- Analog axis holds (loader/crane dials) are time-based: the engine
@@ -332,6 +381,26 @@ function Farmhand:update(dt)
     self.slowTimer = self.slowTimer + dt
     if self.slowTimer >= SLOW_MS then
         self.slowTimer = 0
+        -- In multiplayer a player can join another farm mid-session. The farm id
+        -- was read once at start, so every farm-specific list would go on showing
+        -- the old farm. Re-read it on this 2 s tier and start fresh on a change.
+        pcall(function()
+            local fid = g_currentMission:getFarmId()
+            if fid ~= nil and fid ~= self.farmId then
+                log("farm changed (%s -> %s)", tostring(self.farmId), tostring(fid))
+                self.farmId = fid
+                self.aiWatch = {}
+                self.aiStops = {}
+                pcall(FarmHandCollectors.resetCaches)
+                if FarmHandEdge ~= nil then FarmHandEdge.reset() end
+            end
+        end)
+        -- Edge widget discovery: once per load, on the first slow tick (the map
+        -- is fully up by then), and only when modSettings holds probe.on.
+        if not self.probeDone and FarmHandProbe ~= nil then
+            self.probeDone = true
+            pcall(FarmHandProbe.autoRun, self.farmId)
+        end
         local ok, payload = pcall(function()
             local bits = { '"event":"farm"' }
             -- stuck check rides the same 2s cadence as the fleet read
@@ -375,6 +444,15 @@ function Farmhand:update(dt)
         if not ok then self:reportTierFail("IDLE", payload) end
         if ok and payload ~= nil then self.transport:send(payload) end
     end
+
+    -- WIDGET: farm-wide frames for the FlowKits Companion, on its pipe only.
+    -- FarmHandEdge.update returns at once while that pipe is not connected, so a
+    -- plugin-only player pays one table lookup per frame for all of it.
+    if FarmHandEdge ~= nil then
+        local eok, err = pcall(FarmHandEdge.update, dt, self.transport, self.farmId, self.aiWatch, self.aiStops)
+        if not eok then self:reportTierFail("EDGE", err) end
+    end
+    if FarmHandEdgeCommands ~= nil then pcall(FarmHandEdgeCommands.update, dt) end
 end
 
 --- Log a tier collector failure ONCE per distinct error, so a repeatedly-failing
@@ -399,7 +477,12 @@ function Farmhand:deleteMap()
     -- play session, but the moment you use menu-reload as a dev loop it produces
     -- duplicate alerts and phantom "double stop" readings.
     pcall(function() g_messageCenter:unsubscribeAll(self) end)
+    if FarmHandEdge ~= nil then FarmHandEdge.reset() end
+    if FarmHandEdgeCommands ~= nil then FarmHandEdgeCommands.reset() end
+    pcall(FarmHandCollectors.resetCaches)
+    self.aiStops = {}
     self.ready = false
+    self.probeDone = false
     self.lateStartTried = false
 end
 
