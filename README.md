@@ -140,14 +140,14 @@ The mod reads files only through the engine XML API, never with `io.open` in rea
 
 ## Installing by hand
 
-Download the newest `release/FS25_Farmhand-<version>.zip` and put it in your mods folder:
+Download [FS25_Farmhand.zip](https://github.com/getflowkits/fs25-farmhand-mod/releases/latest/download/FS25_Farmhand.zip) (always the newest release) and put it in your mods folder:
 
 ```
 %USERPROFILE%\Documents\My Games\FarmingSimulator2025\mods\
 ```
 
-Leave it as a zip.
-FS25 refuses to load folder mods in multiplayer.
+Leave it as a zip, and keep the name `FS25_Farmhand.zip`.
+FS25 refuses to load folder mods in multiplayer, and it rejects a mod whose file name has anything but letters, digits and underscores: the versioned files in `release/` are for the FlowKits plugin's feed, and the game ignores them if you drop one in as it is.
 Then tick "FS25 Farmhand Companion" in the mod list when you load a savegame.
 
 ## Building your own zip
