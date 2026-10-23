@@ -1,5 +1,6 @@
 {
   "version": "2.20.1.0",
   "url": "https://raw.githubusercontent.com/getflowkits/fs25-farmhand-mod/main/release/FS25_Farmhand-2.20.1.0.zip",
-  "sha256": "0e5b45058db221bd0b3a815155cc66ff406ed9929f0345b2f7de324ebfdb2807"
+  "sha256": "0e5b45058db221bd0b3a815155cc66ff406ed9929f0345b2f7de324ebfdb2807",
+  "companionInstall": true
 }
