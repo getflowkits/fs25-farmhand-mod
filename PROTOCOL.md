@@ -77,7 +77,7 @@ Every line is a JSON object with an `event` key.
 
 | `event` | Cadence | Keys |
 | --- | --- | --- |
-| `hello` | Once, when the pipe connects | `modVersion` |
+| `hello` | Once, when the pipe connects | `modVersion`, `userPath` (2.20.1 and later) |
 | `state` | 4 Hz | `ctx` (`"vehicle"` or `"onFoot"`), `world`, `vehicle` (only when `ctx` is `"vehicle"`) |
 | `farm` | 0.5 Hz | `fleet`, `contracts`, `field` (only when in a vehicle on a field) |
 | `estate` | 0.1 Hz | `season`, `husbandries`, `productions`, `prices` |
@@ -86,6 +86,10 @@ Every line is a JSON object with an `event` key.
 `hello` is the version handshake.
 Compare on the first three components (`2.19.0`); the fourth is a build number.
 In multiplayer the running mod comes from the host, so this is the only reliable way to know what version you are actually talking to.
+
+`userPath` is the game's own user folder, exactly as the game reports it (forward slashes, trailing slash), for example `C:/Users/you/Documents/My Games/FarmingSimulator2025/`.
+Write your command and session files under its `modSettings/FS25_Farmhand/`.
+Don't assume Documents: a `-profile` launch option can put this folder anywhere, and the Microsoft Store / Game Pass build keeps it inside its package folder.
 
 The shape inside each key (`world`, `vehicle`, `fleet`, and so on) is produced by one function per key in `scripts/Collectors.lua`.
 That file is the reference, and it is written to be read.

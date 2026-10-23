@@ -83,9 +83,23 @@ function FarmHandTransport:log(fmt, ...)
     print("[FarmHand] " .. (ok and msg or tostring(fmt)))
 end
 
+--- JSON-escape a string. Local for the reason Commands.lua keeps its own: the
+--- user folder is a real path, so it carries backslashes on some setups, and
+--- one unescaped character would make the listener drop the whole hello.
+local function jsonEsc(s)
+    s = tostring(s)
+    s = s:gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("%c", "")
+    return s
+end
+
 function FarmHandTransport:init()
     local ok, base = pcall(getUserProfileAppPath)
     if ok and base ~= nil then
+        -- Sent in every hello. A -profile launch option can put this anywhere and
+        -- Game Pass keeps it in the package container, so a listener that guesses
+        -- writes commands into a folder this mod never reads (telemetry still
+        -- flows, every button is dead). The game's own answer ends the guessing.
+        self.userPath = base
         self.baseDir = base .. MOD_SETTINGS
         pcall(createFolder, base .. "modSettings/")
         pcall(createFolder, self.baseDir)
@@ -129,10 +143,11 @@ function FarmHandTransport:openPipe(l)
     -- Identify ourselves immediately. This is the only reliable version signal
     -- in multiplayer, where the running mod came from the host rather than from
     -- whatever was installed locally.
+    local where = self.userPath ~= nil and string.format(',"userPath":"%s"', jsonEsc(self.userPath)) or ""
     if l.name == "edge" then
-        self:writeTo(l, string.format('{"event":"hello","modVersion":"%s","protocol":"%s"}', self.modVersion, EDGE_PROTOCOL))
+        self:writeTo(l, string.format('{"event":"hello","modVersion":"%s","protocol":"%s"%s}', self.modVersion, EDGE_PROTOCOL, where))
     else
-        self:writeTo(l, string.format('{"event":"hello","modVersion":"%s"}', self.modVersion))
+        self:writeTo(l, string.format('{"event":"hello","modVersion":"%s"%s}', self.modVersion, where))
     end
     return true
 end
