@@ -89,13 +89,14 @@ Vehicle and implement state, fleet status, the current field, animals, productio
 Collectors are in `Collectors.lua`, one function per group.
 
 Everything farm-specific is scoped to the local player's own farm.
-`Farmhand.lua` resolves the farm once with `g_currentMission:getFarmId()`, and each collector filters on `ownerFarmId == farmId`.
+`Farmhand.lua` resolves the farm once with `g_currentMission:getFarmId()`, and each collector filters on the object's owning farm (`ownerFarmId` for vehicles and placeables, `farmId` for contracts) against it.
 The active vehicle comes from `g_localPlayer:getCurrentVehicle()`.
 Selling station prices are not farm-scoped, because they are the same public prices every player can read on the map and in the prices menu.
 
 ## Multiplayer
 
 The mod declares multiplayer support and runs on the client.
+On a dedicated server it stays idle: no pipe, no collectors, nothing read from the server's game.
 
 It reports nothing that the player running it could not already see for their own farm in their own HUD and menus.
 It grants no information about other farms or other players.

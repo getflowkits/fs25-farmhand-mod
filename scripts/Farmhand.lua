@@ -25,7 +25,7 @@ Farmhand = {}
 -- EVERY session - the exact "alarm that fires when nothing is wrong" its own
 -- comment warns about, which trains you to ignore the one real case it exists to
 -- catch (4 Aug).
-Farmhand.VERSION = "2.20.1"
+Farmhand.VERSION = "2.20.2"
 
 local FAST_MS = 250      -- active vehicle
 local SLOW_MS = 2000     -- fleet, field, contracts
@@ -284,7 +284,25 @@ end
 --- Idempotent: runs from loadMap normally, or from the first update when
 --- loadMap never arrived (see Farmhand:update).
 function Farmhand:start()
-    if self.ready then return end
+    if self.ready or self.serverOnly then return end
+    -- A dedicated server has no player, no Stream Deck and no widget, so there
+    -- is nobody to talk to. Stay out of the game entirely there: no pipe, no
+    -- collectors reading the server's own missions and vehicles.
+    -- NOT getIsClient(): on a real dedicated server (FS25 1.25.1.0) it returns
+    -- TRUE, so 2.20.2's first cut of this guard never fired. Measured on
+    -- dedicatedServer.exe, 19 Nov 2026: g_dedicatedServer is a table there.
+    -- NOT missionDynamicInfo.isClient either: it is false on the dedicated
+    -- server, but it means "this machine is the server", so a player HOSTING
+    -- from the game has it false too and would lose the deck for the session.
+    -- If a patch ever drops g_dedicatedServer, the cost is only the mod running
+    -- on the server again, which the contracts collector no longer harms.
+    local dedicated = false
+    pcall(function() dedicated = g_dedicatedServer ~= nil end)
+    if dedicated then
+        self.serverOnly = true
+        log("FarmHand Telemetry %s: dedicated server, staying idle", Farmhand.VERSION)
+        return
+    end
     log("FarmHand Telemetry %s starting", Farmhand.VERSION)
 
     self.transport = FarmHandTransport.new(Farmhand.VERSION)
@@ -318,6 +336,7 @@ function Farmhand:update(dt)
     -- before us, so the mod loaded with no error and never started. update only
     -- runs once the mission is running, i.e. after the loadMap pass, so starting
     -- here is safe. One attempt only: a throw would otherwise repeat every frame.
+    if self.serverOnly then return end
     if not self.ready and not self.lateStartTried then
         self.lateStartTried = true
         log("loadMap never arrived (skipped by another mod), starting from update")
@@ -482,6 +501,7 @@ function Farmhand:deleteMap()
     pcall(FarmHandCollectors.resetCaches)
     self.aiStops = {}
     self.ready = false
+    self.serverOnly = false
     self.probeDone = false
     self.lateStartTried = false
 end

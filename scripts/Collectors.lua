@@ -778,11 +778,25 @@ end
 
 --- Contracts, BOTH yours-in-progress and still-on-offer.
 --- VERIFIED: the accessor is getMissions() (getActiveMissions does not exist)
---- and it returns ALL missions, so ownerFarmId decides which is which. The old
+--- and it returns ALL missions, so mission.farmId decides which is which. The old
 --- version kept only owned ones, which left "best available contract" with
 --- nothing to read at all.
 --- Yours sort first (you care about finishing them), then offers by reward
 --- descending, so the top of the list is the one worth taking.
+---
+--- Whose contract it is: mission.farmId, which MissionManager:startMission
+--- sets. ownerFarmId is the Object default (0) on an offer and is not what
+--- startMission sets, so it cannot tell yours from an offer; reading it made
+--- every mission "yours" wherever the local farm id is also 0, which is a
+--- dedicated server (no local player). The Edge collectors already read farmId.
+---
+--- ⚠️ Completion is the game's own m.completion field, NEVER m:getCompletion().
+--- On a field mission that call is not a getter: getFieldCompletion latches
+--- isFieldCompletionInitialized on its first call, and a call before the
+--- mission's prepare() latches it with no completion modifier, so the
+--- partition table is never built. Once the contract runs, the game's own
+--- updateTick throws at AbstractFieldMission.lua:472 several times a second
+--- and the contract never completes. Field report, dedicated server, 18 Nov 2026.
 function FarmHandCollectors.contracts(farmId, limit)
     local mm = g_missionManager
     if mm == nil then return '{"items":[],"total":0}' end
@@ -792,17 +806,19 @@ function FarmHandCollectors.contracts(farmId, limit)
 
     local rows = {}
     for _, m in pairs(missions) do
-        local owner = nil
-        pcall(function() owner = m.ownerFarmId end)
-        local mine = (owner ~= nil and owner == farmId)
-        -- unowned == on offer. Guard against another farm's contracts in MP by
-        -- only treating nil/0 as available rather than "anything not mine".
-        local available = (not mine) and (owner == nil or owner == 0)
+        local owner, status = nil, nil
+        pcall(function() owner = m.farmId end)
+        if owner == 0 then owner = nil end
+        pcall(function() status = m.status end)
+        local mine = owner ~= nil and owner == farmId
+        -- an offer is a contract nobody has started (MissionStatus.CREATED = 1,
+        -- in-game 22 Oct); another farm's contract is neither
+        local available = owner == nil and status == 1
         if mine or available then
             local title, reward, completion = "?", 0, nil
             pcall(function() title = tostring(m.progressTitle or m.title or (m.type ~= nil and m.type.name) or "?") end)
             pcall(function() reward = num(m.reward) end)
-            if mine then pcall(function() completion = num(m:getCompletion()) end) end
+            if mine then pcall(function() completion = num(m.completion) end) end
             rows[#rows + 1] = { title = title, reward = reward, completion = completion, mine = mine }
         end
     end
